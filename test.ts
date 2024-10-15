@@ -1,9 +1,21 @@
 import dotenv from "dotenv";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
-import { DEFAULT_COMMITMENT, PumpFunSDK, DEFAULT_DECIMALS, calculateWithSlippageBuy, calculateWithSlippageSell } from "./src";
+import { 
+  Connection, 
+  Keypair, 
+  LAMPORTS_PER_SOL, 
+  PublicKey 
+} from "@solana/web3.js";
+import { 
+  DEFAULT_COMMITMENT, 
+  PumpFunSDK, 
+  DEFAULT_DECIMALS, 
+  calculateWithSlippageBuy, 
+  calculateWithSlippageSell, 
+  getCurrentDateTime, 
+  BondingCurveAccount
+} from "./src";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { AnchorProvider } from "@coral-xyz/anchor";
-import { getCurrentDateTime } from "./src";
 import { bondingCurveFilter } from "./src/filters";
 import bs58 from "bs58";
 import BigNumber from "bignumber.js";
@@ -31,6 +43,7 @@ let mintCache = new Set<string>();
 let interval: NodeJS.Timeout | undefined;
 let isProcessingToken = false;
 let eventId: number = 0;
+let bondingCurveAccount: BondingCurveAccount | null;
 
 const main = async () => {
   if (!rpcEndpoint) {
@@ -53,11 +66,11 @@ const main = async () => {
     const allFiltersOk = checkResults.every((result: any) => result!.ok);
 
     if (allFiltersOk) {
-      isProcessingToken = true;
-      const bondingCurveAccount = await sdk.getBondingCurveAccount(event.mint);
-      const getBuyOutPrice = bondingCurveAccount?.getBuyOutPrice(BigInt(buyAmount), buySlippage);
-      const slippageBuy = calculateWithSlippageBuy(getBuyOutPrice!, buySlippage);
-      buyTransaction(event.mint, slippageBuy);
+      isProcessingToken = true;   
+      bondingCurveAccount = await sdk.getBondingCurveAccount(event.mint);
+      const getBuyPrice = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
+      const slippageBuy = calculateWithSlippageBuy(getBuyPrice!, buySlippage);
+      buyTransaction(event.mint, slippageBuy); 
     } else {
       isProcessingToken = false;
       console.log(checkResults, event.mint.toString());
@@ -97,16 +110,17 @@ const buyTransaction = async (mintAddress: PublicKey, slippage: bigint) => {
 // Check price at intervals
 const checkPriceIntervals = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint) => {
   isProcessingToken = true;
-  const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
-  const getBuyOutPrice = bondingCurveAccount?.getBuyOutPrice(tokenBalance, buySlippage);
-  const getBuyOutPriceBN = new BigNumber(getBuyOutPrice!.toString()).dividedBy(LAMPORTS_PER_SOL);
+  const tokensBuyPrice = await sdk.getTokensBuyPrice(tokenBalance, mintAddress);
+  const tokensBuyPriceBN = new BigNumber(tokensBuyPrice!.toString()).dividedBy(10**3);
   interval = setInterval(async () => {
     try {
-      const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
+      const tokensSellPrice = await sdk.getTokensSellPrice(tokenBalance, mintAddress);
+      const tokensSellPriceBN = new BigNumber(tokensSellPrice!.toString()).dividedBy(10**3);
+      
       const getSellPrice = bondingCurveAccount?.getSellPrice(tokenBalance, sellSlippage);
-      const getSellPriceBN = new BigNumber(getSellPrice!.toString()).dividedBy(LAMPORTS_PER_SOL);
       const slippageSell = calculateWithSlippageSell(getSellPrice!, sellSlippage);
-      checkTakeProfitOrStopLoss(sdk, mintAddress, getBuyOutPriceBN, getSellPriceBN, tokenBalance, slippageSell);
+
+      checkTakeProfitOrStopLoss(sdk, mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance, slippageSell);
     } catch (error) {
       console.error("Error during price check:", error);
       clearInterval(interval);
@@ -118,30 +132,30 @@ const checkPriceIntervals = async (sdk: PumpFunSDK, mintAddress: PublicKey, toke
 const checkTakeProfitOrStopLoss = async (
   sdk: PumpFunSDK,
   mintAddress: PublicKey,
-  getBuyOutPriceBN: BigNumber,
-  getSellPriceBN: BigNumber,
+  tokensBuyPriceBN: BigNumber,
+  tokensSellPriceBN: BigNumber,
   tokenBalance: bigint,
   slippageSell:bigint
 ) => {
-  const profitTarget = getBuyOutPriceBN.multipliedBy(1 + takeProfitPercentage / 100);
-  const stopLossTarget = getBuyOutPriceBN.multipliedBy(1 - stopLossPercentage / 100);
-  if (takeProfitPercentage && getSellPriceBN.isGreaterThanOrEqualTo(profitTarget)) {
+  const profitTarget = tokensBuyPriceBN.multipliedBy(1 + takeProfitPercentage / 100);
+  const stopLossTarget = tokensBuyPriceBN.multipliedBy(1 - stopLossPercentage / 100);
+  if (takeProfitPercentage && tokensSellPriceBN.isGreaterThanOrEqualTo(profitTarget)) {
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Take-profit triggered.`);
     await sellTransaction(sdk, mintAddress, tokenBalance, slippageSell);
-  } else if (stopLossPercentage && getSellPriceBN.isLessThanOrEqualTo(stopLossTarget)) {
+  } else if (stopLossPercentage && tokensSellPriceBN.isLessThanOrEqualTo(stopLossTarget)) {
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Stop-loss triggered.`);
     await sellTransaction(sdk, mintAddress, tokenBalance, slippageSell);
   } 
-  if (getBuyOutPriceBN && getSellPriceBN) {
-    const priceChangePercentage = getSellPriceBN.minus(getBuyOutPriceBN).dividedBy(getBuyOutPriceBN).multipliedBy(100).toNumber();
+  if (tokensBuyPriceBN && tokensSellPriceBN) {
+    const priceChangePercentage = tokensSellPriceBN.minus(tokensBuyPriceBN).dividedBy(tokensBuyPriceBN).multipliedBy(100).toNumber();
     const color = priceChangePercentage < 0 ? '\x1b[31m' : '\x1b[32m'; 
     const resetColor = '\x1b[0m'; 
     console.log(
-      `[${getCurrentDateTime()}] Buy price (SOL): ${getBuyOutPriceBN.toFixed(9)}, Sell price (SOL): ${getSellPriceBN.toFixed(9)}, Percentage change: ${color}${priceChangePercentage}%${resetColor}`
+      `[${getCurrentDateTime()}] Buy price (SOL): ${tokensBuyPriceBN.toFixed()}, Sell price (SOL): ${tokensSellPriceBN.toFixed()}, Percentage change: ${color}${priceChangePercentage}%${resetColor}`
     );
   } else {
     console.error("Price values not properly initialized.");

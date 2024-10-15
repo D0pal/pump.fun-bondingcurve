@@ -397,12 +397,12 @@ export class PumpFunSDK {
     mint: PublicKey, 
     commitment: Commitment = DEFAULT_COMMITMENT
   ) {
-    const bondingCurveAccount = await this.getBondingCurveAccount(
+    let bondingCurveAccount = await this.getBondingCurveAccount(
       mint, 
       commitment
     );
     
-    const globalAccount = await this.getGlobalAccount(
+    let globalAccount = await this.getGlobalAccount(
       commitment
     );
 
@@ -416,6 +416,47 @@ export class PumpFunSDK {
       let BondingCurveProgress = 100 - (Number(leftTokens) * 100 / Number(initialRealTokenReserves));
   
       return BondingCurveProgress;
+    }
+  }
+
+  async getTokensBuyPrice(
+    tokens: bigint,
+    mint: PublicKey, 
+    commitment: Commitment = DEFAULT_COMMITMENT
+  ) {
+    let bondingCurveAccount = await this.getBondingCurveAccount(
+      mint, 
+      commitment
+    );
+
+    if (bondingCurveAccount) {
+      let product_of_reserves = bondingCurveAccount.virtualSolReserves * bondingCurveAccount.virtualTokenReserves;
+      let new_virtual_token_reserves = bondingCurveAccount.virtualTokenReserves - tokens;
+      let new_virtual_sol_reserves = product_of_reserves / new_virtual_token_reserves + 1n;
+      let amount_needed = new_virtual_sol_reserves > bondingCurveAccount.virtualSolReserves ? new_virtual_sol_reserves - bondingCurveAccount.virtualSolReserves : 0n;
+      return amount_needed > 0n ? amount_needed : 0n;
+    }
+  }
+
+  async getTokensSellPrice(
+    tokens: bigint,
+    mint: PublicKey, 
+    commitment: Commitment = DEFAULT_COMMITMENT
+  ) {
+    let bondingCurveAccount = await this.getBondingCurveAccount(
+      mint, 
+      commitment
+    );
+
+    let globalAccount = await this.getGlobalAccount(
+      commitment
+    );
+
+    if (bondingCurveAccount && globalAccount) {
+      let scaling_factor = globalAccount.initialVirtualTokenReserves;
+      let token_sell_proportion = (tokens * scaling_factor) / bondingCurveAccount.virtualTokenReserves;
+      let sol_received = (bondingCurveAccount.virtualSolReserves * token_sell_proportion) / scaling_factor;
+      return sol_received < bondingCurveAccount.realSolReserves ? sol_received : bondingCurveAccount.realSolReserves;
     }
   }
 
