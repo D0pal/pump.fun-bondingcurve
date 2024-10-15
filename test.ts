@@ -60,7 +60,6 @@ const main = async () => {
     isProcessingToken = true;
 
     console.log(`[${getCurrentDateTime()}] Checking mint: ${event.mint}`);
-   
     const bondingCurvePercent = await sdk.getBondingCurvePercentage(event.mint); 
     const checkResults = await Promise.all([bondingCurveFilter(bondingCurvePercent!)]);
     const allFiltersOk = checkResults.every((result: any) => result!.ok);
@@ -68,9 +67,7 @@ const main = async () => {
     if (allFiltersOk) {
       isProcessingToken = true;   
       bondingCurveAccount = await sdk.getBondingCurveAccount(event.mint);
-      const getBuyPrice = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
-      const slippageBuy = calculateWithSlippageBuy(getBuyPrice!, buySlippage);
-      buyTransaction(event.mint, slippageBuy); 
+      buyTransaction(event.mint); 
     } else {
       isProcessingToken = false;
       console.log(checkResults, event.mint.toString());
@@ -87,7 +84,9 @@ const main = async () => {
 };
 
 // Buy transaction logic
-const buyTransaction = async (mintAddress: PublicKey, slippage: bigint) => {
+const buyTransaction = async (mintAddress: PublicKey) => {
+  const getBuyPrice = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
+  const slippage = calculateWithSlippageBuy(getBuyPrice!, buySlippage);
   const buyResult = await sdk.buy(signerKeyPair, mintAddress, BigInt(buyAmount), slippage, {
     unitLimit: computeUnitLimit,
     unitPrice: computeUnitPrice,
@@ -116,11 +115,7 @@ const checkPriceIntervals = async (sdk: PumpFunSDK, mintAddress: PublicKey, toke
     try {
       const tokensSellPrice = await sdk.getTokensSellPrice(tokenBalance, mintAddress);
       const tokensSellPriceBN = new BigNumber(tokensSellPrice!.toString()).dividedBy(10**3);
-      
-      const getSellPrice = bondingCurveAccount?.getSellPrice(tokenBalance, sellSlippage);
-      const slippageSell = calculateWithSlippageSell(getSellPrice!, sellSlippage);
-
-      checkTakeProfitOrStopLoss(sdk, mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance, slippageSell);
+      checkTakeProfitOrStopLoss(sdk, mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance);
     } catch (error) {
       console.error("Error during price check:", error);
       clearInterval(interval);
@@ -134,8 +129,7 @@ const checkTakeProfitOrStopLoss = async (
   mintAddress: PublicKey,
   tokensBuyPriceBN: BigNumber,
   tokensSellPriceBN: BigNumber,
-  tokenBalance: bigint,
-  slippageSell:bigint
+  tokenBalance: bigint
 ) => {
   const profitTarget = tokensBuyPriceBN.multipliedBy(1 + takeProfitPercentage / 100);
   const stopLossTarget = tokensBuyPriceBN.multipliedBy(1 - stopLossPercentage / 100);
@@ -143,12 +137,12 @@ const checkTakeProfitOrStopLoss = async (
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Take-profit triggered.`);
-    await sellTransaction(sdk, mintAddress, tokenBalance, slippageSell);
+    await sellTransaction(sdk, mintAddress, tokenBalance);
   } else if (stopLossPercentage && tokensSellPriceBN.isLessThanOrEqualTo(stopLossTarget)) {
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Stop-loss triggered.`);
-    await sellTransaction(sdk, mintAddress, tokenBalance, slippageSell);
+    await sellTransaction(sdk, mintAddress, tokenBalance);
   } 
   if (tokensBuyPriceBN && tokensSellPriceBN) {
     const priceChangePercentage = tokensSellPriceBN.minus(tokensBuyPriceBN).dividedBy(tokensBuyPriceBN).multipliedBy(100).toNumber();
@@ -164,8 +158,10 @@ const checkTakeProfitOrStopLoss = async (
 };
 
 // Sell transaction logic
-const sellTransaction = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint, slippage: bigint) => {
+const sellTransaction = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint) => {
   if (tokenBalance) {
+    const getSellPrice = bondingCurveAccount?.getSellPrice(tokenBalance, sellSlippage);
+    const slippage = calculateWithSlippageSell(getSellPrice!, sellSlippage);
     const sellResult = await sdk.sell(signerKeyPair, mintAddress, tokenBalance, slippage);
     const [splBalance] = await Promise.all([
       getSPLBalance(sdk.connection, mintAddress, signerKeyPair.publicKey)
