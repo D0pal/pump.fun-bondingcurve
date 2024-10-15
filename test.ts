@@ -11,8 +11,7 @@ import {
   DEFAULT_DECIMALS, 
   calculateWithSlippageBuy, 
   calculateWithSlippageSell, 
-  getCurrentDateTime, 
-  BondingCurveAccount
+  getCurrentDateTime
 } from "./src";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { AnchorProvider } from "@coral-xyz/anchor";
@@ -43,7 +42,6 @@ let mintCache = new Set<string>();
 let interval: NodeJS.Timeout | undefined;
 let isProcessingToken = false;
 let eventId: number = 0;
-let bondingCurveAccount: BondingCurveAccount | null;
 
 const main = async () => {
   if (!rpcEndpoint) {
@@ -66,7 +64,6 @@ const main = async () => {
 
     if (allFiltersOk) {
       isProcessingToken = true;   
-      bondingCurveAccount = await sdk.getBondingCurveAccount(event.mint);
       buyTransaction(event.mint); 
     } else {
       isProcessingToken = false;
@@ -85,6 +82,7 @@ const main = async () => {
 
 // Buy transaction logic
 const buyTransaction = async (mintAddress: PublicKey) => {
+  const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
   const getBuyPrice = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
   const slippage = calculateWithSlippageBuy(getBuyPrice!, buySlippage);
   const buyResult = await sdk.buy(signerKeyPair, mintAddress, BigInt(buyAmount), slippage, {
@@ -160,6 +158,7 @@ const checkTakeProfitOrStopLoss = async (
 // Sell transaction logic
 const sellTransaction = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint) => {
   if (tokenBalance) {
+    const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
     const getSellPrice = bondingCurveAccount?.getSellPrice(tokenBalance, sellSlippage);
     const slippage = calculateWithSlippageSell(getSellPrice!, sellSlippage);
     const sellResult = await sdk.sell(signerKeyPair, mintAddress, tokenBalance, slippage);
