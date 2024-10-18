@@ -50,11 +50,11 @@ let eventId: number;
 
 const main = async () => {
   if (!eventSubscriptionRpcEndpoint) {
-    console.error("Please set ET_RPC_ENDPOINT in .env file");
+    console.error("Please set EVENT_SUBSCRIPTION_ENDPOINT in .env file");
     return;
   }
   if (!transactionRpcEndpoint) {
-    console.error("Please set TX_RPC_ENDPOINT in .env file");
+    console.error("Please set TRANSACTION_ENDPOINT in .env file");
     return;
   }
 
