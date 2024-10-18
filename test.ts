@@ -11,7 +11,8 @@ import {
   DEFAULT_DECIMALS, 
   calculateWithSlippageBuy, 
   calculateWithSlippageSell, 
-  getCurrentDateTime
+  getCurrentDateTime,
+  PumpFunEventHandlers
 } from "./src";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { AnchorProvider } from "@coral-xyz/anchor";
@@ -22,12 +23,16 @@ import { getSPLBalance } from "./util";
 
 dotenv.config();
 
-const rpcEndpoint = process.env.RPC_ENDPOINT as string;
-const connection = new Connection(rpcEndpoint);
+const eventSubscriptionRpcEndpoint = process.env.EVENT_SUBSCRIPTION_ENDPOINT as string;
+const transactionRpcEndpoint = process.env.TRANSACTION_ENDPOINT as string;
+const eventSubscriptionConnection = new Connection(eventSubscriptionRpcEndpoint);
+const transactionConnection = new Connection(transactionRpcEndpoint);
 const signerKeyPair = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY || ""));
 const wallet = new NodeWallet(signerKeyPair);
-const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
-const sdk = new PumpFunSDK(provider);
+const eventSubscriptionProvider = new AnchorProvider(eventSubscriptionConnection, wallet, { commitment: "processed" });
+const transactionProvider = new AnchorProvider(transactionConnection, wallet, { commitment: "confirmed" });
+const eventSubscriptionSdk = new PumpFunSDK(eventSubscriptionProvider);
+const transactionSdk = new PumpFunSDK(transactionProvider);
 const checkInterval = parseFloat(process.env.CHECK_INTERVAL || "0");
 const buySlippage = BigInt(Math.floor(Number(process.env.BUY_SLIPPAGE || "0")));
 const sellSlippage = BigInt(Math.floor(Number(process.env.SELL_SLIPPAGE || "0")));
@@ -41,11 +46,15 @@ const stopLossPercentage = parseFloat(process.env.STOP_LOSS_PERCENTAGE || "0");
 let mintCache = new Set<string>();
 let interval: NodeJS.Timeout | undefined;
 let isProcessingToken = false;
-let eventId: number = 0;
+let eventId: number;
 
 const main = async () => {
-  if (!rpcEndpoint) {
-    console.error("Please set RPC_URL in .env file");
+  if (!eventSubscriptionRpcEndpoint) {
+    console.error("Please set ET_RPC_ENDPOINT in .env file");
+    return;
+  }
+  if (!transactionRpcEndpoint) {
+    console.error("Please set TX_RPC_ENDPOINT in .env file");
     return;
   }
 
@@ -58,11 +67,12 @@ const main = async () => {
     isProcessingToken = true;
 
     console.log(`[${getCurrentDateTime()}] Checking mint: ${event.mint}`);
-    const bondingCurvePercent = await sdk.getBondingCurvePercentage(event.mint); 
+    const bondingCurvePercent = await eventSubscriptionSdk.getBondingCurvePercentage(event.mint); 
     const checkResults = await Promise.all([bondingCurveFilter(bondingCurvePercent!)]);
     const allFiltersOk = checkResults.every((result: any) => result!.ok);
 
     if (allFiltersOk) {
+      eventSubscriptionSdk.removeEventListener(eventId);
       isProcessingToken = true;   
       buyTransaction(event.mint); 
     } else {
@@ -71,33 +81,38 @@ const main = async () => {
     } 
   };
 
-  if (eventListenerType === "createEvent") {
-    eventId = sdk.addEventListener("createEvent", handleEvent)
-  } else if (eventListenerType === "tradeEvent") {
-    eventId = sdk.addEventListener("tradeEvent", handleEvent)
+  const validEvents: Array<keyof PumpFunEventHandlers> = ["createEvent", "tradeEvent"];
+  if (eventListenerType && validEvents.includes(eventListenerType as keyof PumpFunEventHandlers)) {
+    eventId = eventSubscriptionSdk.addEventListener(eventListenerType as keyof PumpFunEventHandlers, handleEvent);
   } else {
-    console.error("Invalid event listener specified in .env file");
+    console.error("Invalid or undefined event listener specified in .env file");
   }
 };
 
 // Buy transaction logic
 const buyTransaction = async (mintAddress: PublicKey) => {
-  const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
-  const getBuyPrice = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
-  const slippage = calculateWithSlippageBuy(getBuyPrice!, buySlippage);
-  const buyResult = await sdk.buy(signerKeyPair, mintAddress, BigInt(buyAmount), slippage, {
-    unitLimit: computeUnitLimit,
-    unitPrice: computeUnitPrice,
-  });
+  const bondingCurveAccount = await eventSubscriptionSdk.getBondingCurveAccount(mintAddress);
+  const expectedAmountOut = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
+  const slippage = calculateWithSlippageBuy(expectedAmountOut!, buySlippage);
+  const buyResult = await transactionSdk.buy(
+    signerKeyPair, 
+    mintAddress, 
+    BigInt(buyAmount), 
+    slippage, 
+    {
+      unitLimit: computeUnitLimit,
+      unitPrice: computeUnitPrice,
+    }
+  );
   const [splBalance] = await Promise.all([
-    getSPLBalance(sdk.connection, mintAddress, signerKeyPair.publicKey)
+    getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
   ]);
   if (buyResult.success && splBalance) {
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Bought token: ${mintAddress}`);
     const tokenBalance = new BigNumber(splBalance ?? 0);
     const tokenBalanceBigInt = BigInt(tokenBalance.multipliedBy(Math.pow(10, DEFAULT_DECIMALS)).toFixed());
-    await checkPriceIntervals(sdk, mintAddress, tokenBalanceBigInt);
+    await checkPriceIntervals(mintAddress, tokenBalanceBigInt);
   } else {
     isProcessingToken = false;
     console.log("Buy failed.");
@@ -105,25 +120,38 @@ const buyTransaction = async (mintAddress: PublicKey) => {
 };
 
 // Check price at intervals
-const checkPriceIntervals = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint) => {
+const checkPriceIntervals = async (mintAddress: PublicKey, tokenBalance: bigint) => {
   isProcessingToken = true;
-  const tokensBuyPrice = await sdk.getTokensBuyPrice(tokenBalance, mintAddress);
-  const tokensBuyPriceBN = new BigNumber(tokensBuyPrice!.toString()).dividedBy(10**3);
+  const tokensBuyPrice = await eventSubscriptionSdk.getTokensBuyPrice(tokenBalance, mintAddress);
+  const tokensBuyPriceBN = new BigNumber(tokensBuyPrice!.toString());
   interval = setInterval(async () => {
     try {
-      const tokensSellPrice = await sdk.getTokensSellPrice(tokenBalance, mintAddress);
-      const tokensSellPriceBN = new BigNumber(tokensSellPrice!.toString()).dividedBy(10**3);
-      checkTakeProfitOrStopLoss(sdk, mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance);
+      const tokensSellPrice = await eventSubscriptionSdk.getTokensSellPrice(tokenBalance, mintAddress);
+      const tokensSellPriceBN = new BigNumber(tokensSellPrice!.toString());
+      checkTakeProfitOrStopLoss(mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance);
     } catch (error) {
       console.error("Error during price check:", error);
       clearInterval(interval);
     }
   }, checkInterval);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.on('data', async (key) => {
+    if (key.toString() === 's' && tokenBalance) {
+      console.log('Executing manual sell transaction...');
+      await sellTransaction(mintAddress, tokenBalance);
+    }
+    if (key.toString() === 'e') {
+      clearInterval(interval);
+      console.log(`[${getCurrentDateTime()}] Gracefully shutting down...`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      process.exit(0);
+    }
+  });
 };
 
 // Check take-profit or stop-loss
 const checkTakeProfitOrStopLoss = async (
-  sdk: PumpFunSDK,
   mintAddress: PublicKey,
   tokensBuyPriceBN: BigNumber,
   tokensSellPriceBN: BigNumber,
@@ -135,19 +163,21 @@ const checkTakeProfitOrStopLoss = async (
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Take-profit triggered.`);
-    await sellTransaction(sdk, mintAddress, tokenBalance);
+    console.log('Executing Take-profit triggered sell transaction...');
+    await sellTransaction(mintAddress, tokenBalance);
   } else if (stopLossPercentage && tokensSellPriceBN.isLessThanOrEqualTo(stopLossTarget)) {
     clearInterval(interval);
     isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Stop-loss triggered.`);
-    await sellTransaction(sdk, mintAddress, tokenBalance);
+    console.log('Executing Stop-loss triggered sell transaction...');
+    await sellTransaction(mintAddress, tokenBalance);
   } 
   if (tokensBuyPriceBN && tokensSellPriceBN) {
-    const priceChangePercentage = tokensSellPriceBN.minus(tokensBuyPriceBN).dividedBy(tokensBuyPriceBN).multipliedBy(100).toNumber();
-    const color = priceChangePercentage < 0 ? '\x1b[31m' : '\x1b[32m'; 
+    const profitOrStopLossPercentage = tokensSellPriceBN.minus(tokensBuyPriceBN).dividedBy(tokensBuyPriceBN).multipliedBy(100).toNumber();
+    const color = profitOrStopLossPercentage < 0 ? '\x1b[31m' : '\x1b[32m'; 
     const resetColor = '\x1b[0m'; 
     console.log(
-      `[${getCurrentDateTime()}] Buy price (SOL): ${tokensBuyPriceBN.toFixed()}, Sell price (SOL): ${tokensSellPriceBN.toFixed()}, Percentage change: ${color}${priceChangePercentage}%${resetColor}`
+      `[${getCurrentDateTime()}] Buy price (SOL): ${tokensBuyPriceBN}, Sell price (SOL): ${tokensSellPriceBN}, Profit/Loss: ${color}${profitOrStopLossPercentage}%${resetColor}`
     );
   } else {
     console.error("Price values not properly initialized.");
@@ -156,27 +186,30 @@ const checkTakeProfitOrStopLoss = async (
 };
 
 // Sell transaction logic
-const sellTransaction = async (sdk: PumpFunSDK, mintAddress: PublicKey, tokenBalance: bigint) => {
-  if (tokenBalance) {
-    const bondingCurveAccount = await sdk.getBondingCurveAccount(mintAddress);
-    const getSellPrice = bondingCurveAccount?.getSellPrice(tokenBalance, sellSlippage);
-    const slippage = calculateWithSlippageSell(getSellPrice!, sellSlippage);
-    const sellResult = await sdk.sell(signerKeyPair, mintAddress, tokenBalance, slippage);
-    const [splBalance] = await Promise.all([
-      getSPLBalance(sdk.connection, mintAddress, signerKeyPair.publicKey)
-    ]);
-    if (sellResult.success && !splBalance) {
-      isProcessingToken = true;
-      console.log(`[${getCurrentDateTime()}] Sold token: ${mintAddress}`);
-      clearInterval(interval);
-      sdk.removeEventListener(eventId);
-      console.log(`[${getCurrentDateTime()}] Gracefully shutting down...`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      process.exit(0);
-    } else {
-      isProcessingToken = false;
-      console.log("Sell failed.");
+const sellTransaction = async (mintAddress: PublicKey, tokenBalance: bigint) => {
+  const sellResult = await transactionSdk.sell(
+    signerKeyPair, 
+    mintAddress, 
+    tokenBalance, 
+    sellSlippage,
+    {
+      unitLimit: computeUnitLimit,
+      unitPrice: computeUnitPrice,
     }
+  );
+  const [splBalance] = await Promise.all([
+    getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
+  ]);
+  if (sellResult.success && !splBalance) {
+    isProcessingToken = true;
+    console.log(`[${getCurrentDateTime()}] Sold token: ${mintAddress}`);
+    clearInterval(interval);
+    console.log(`[${getCurrentDateTime()}] Gracefully shutting down...`);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    process.exit(0);
+  } else {
+    isProcessingToken = false;
+    console.log("Sell failed.");
   }
 };
 

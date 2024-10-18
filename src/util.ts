@@ -19,12 +19,13 @@ import {
   PriorityFee,
   TransactionResult,
 } from './types';
-
+import { JitoTransactionExecutor } from './transactions/';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const BLOXROUTE_TIP = parseFloat(process.env.BLOXROUTE_TIP || '0');
+const JITO_TIP = process.env.JITO_TIP || '';
 
 export const DEFAULT_COMMITMENT: Commitment = "confirmed";
 export const DEFAULT_FINALITY: Finality = "confirmed";
@@ -46,7 +47,67 @@ export const calculateWithSlippageSell = (
 export async function sendTx(
   connection: Connection,
   tx: Transaction,
-  payer: PublicKey,
+  payer: Keypair,
+  signers: Keypair[],
+  priorityFees?: PriorityFee,
+  commitment: Commitment = DEFAULT_COMMITMENT,
+  finality: Finality = DEFAULT_FINALITY
+): Promise<TransactionResult> {
+  let newTx = new Transaction();
+
+  if (priorityFees) {
+    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: priorityFees.unitLimit,
+    });
+
+    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: priorityFees.unitPrice,
+    });
+    newTx.add(modifyComputeUnits);
+    newTx.add(addPriorityFee);
+  }
+
+  newTx.add(tx);
+
+  let versionedTx = await buildVersionedTx(connection, payer.publicKey, newTx, commitment);
+  versionedTx.sign(signers);
+
+  try {
+    const sig = await connection.sendTransaction(versionedTx, {
+      skipPreflight: false,
+    });
+    console.log("sig:", `https://solscan.io/tx/${sig}`);
+
+    let txResult = await getTxDetails(connection, sig, commitment, finality);
+    if (!txResult) {
+      return {
+        success: false,
+        error: "Transaction failed",
+      };
+    }
+    return {
+      success: true,
+      signature: sig,
+      results: txResult,
+    };
+  } catch (e) {
+    if (e instanceof SendTransactionError) {
+      let ste = e as SendTransactionError;
+      console.log(await ste.getLogs(connection));
+    } else {
+      console.error(e);
+    }
+    return {
+      error: e,
+      success: false,
+    };
+  }
+}
+
+export async function sendBloxrouteTx(
+  connection: Connection,
+  tx: Transaction,
+  payer: Keypair,
   signers: Keypair[],
   priorityFees?: PriorityFee,
   commitment: Commitment = DEFAULT_COMMITMENT,
@@ -74,14 +135,14 @@ export async function sendTx(
     keys: []
   }))
 
-  newTx.add(bloxrouteTip(payer, BLOXROUTE_TIP));
+  newTx.add(bloxrouteTip(payer.publicKey, BLOXROUTE_TIP));
 
   newTx.recentBlockhash = (await connection.getLatestBlockhash("processed")).blockhash;
 
-  newTx.feePayer = payer;
+  newTx.feePayer = payer.publicKey;
 
   const messageV0 = new TransactionMessage({
-    payerKey: payer,
+    payerKey: payer.publicKey,
     recentBlockhash: newTx.recentBlockhash,
     instructions: newTx.instructions
   }).compileToV0Message();
@@ -121,6 +182,75 @@ export async function sendTx(
     };
   }
 }
+
+export async function sendJitoTx(
+  connection: Connection,
+  tx: Transaction,
+  payer: Keypair,
+  signers: Keypair[],
+  priorityFees?: PriorityFee
+): Promise<TransactionResult> {
+  let newTx = new Transaction();
+
+  if (priorityFees) {
+    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: priorityFees.unitLimit,
+    });
+
+    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: priorityFees.unitPrice,
+    });
+    newTx.add(modifyComputeUnits);
+    newTx.add(addPriorityFee);
+  }
+
+  newTx.add(tx);
+
+  const blockhashInfo = await connection.getLatestBlockhash("processed");
+  
+  newTx.recentBlockhash = blockhashInfo.blockhash;
+  
+  newTx.feePayer = payer.publicKey;
+
+  const messageV0 = new TransactionMessage({
+    payerKey: payer.publicKey,
+    recentBlockhash: newTx.recentBlockhash,
+    instructions: newTx.instructions
+  }).compileToV0Message();
+
+  const versioned = new VersionedTransaction(messageV0)
+  versioned.sign(signers)
+
+  try {
+    const transactionExecutor = new JitoTransactionExecutor(JITO_TIP, connection);
+    
+    const sig =  await transactionExecutor.executeAndConfirm(versioned, payer, blockhashInfo);
+    console.log(sig.signature);
+    console.log("sig:", `https://solscan.io/tx/${sig.signature}`);
+    
+    if (!sig.confirmed) {
+      return {
+        success: false,
+        error: "Transaction failed",
+      };
+    }
+    return {
+      success: true,
+      signature: sig.signature,
+    };
+  } catch (e) {
+    if (e instanceof SendTransactionError) {
+      let ste = e as SendTransactionError;
+      console.log(await ste.getLogs(connection));
+    } else {
+      console.error(e);
+    }
+    return {
+      error: e,
+      success: false,
+    };
+  }
+};
 
 export const buildVersionedTx = async (
   connection: Connection,

@@ -47,12 +47,34 @@ import {
   DEFAULT_COMMITMENT,
   DEFAULT_FINALITY,
   sendTx,
+  sendBloxrouteTx,
+  sendJitoTx,
 } from './util';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const MPL_TOKEN_METADATA_PROGRAM_ID =
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
+const TRANSACTION_EXECUTOR = process.env.TRANSACTION_EXECUTOR || '';
+let txExecutor: any;
 
+switch (TRANSACTION_EXECUTOR) {
+  case 'bloxroute': {
+    txExecutor = sendBloxrouteTx;
+    break;
+  }
+  case 'jito': {
+    txExecutor = sendJitoTx;
+    break;
+  }
+  default: {
+    txExecutor = sendTx;
+    break;
+  }
+}
+  
 export const GLOBAL_ACCOUNT_SEED = "global";
 export const MINT_AUTHORITY_SEED = "mint-authority";
 export const BONDING_CURVE_SEED = "bonding-curve";
@@ -109,10 +131,10 @@ export class PumpFunSDK {
       newTx.add(buyTx);
     }
 
-    let createResults = await sendTx(
+    let createResults = await txExecutor(
       this.connection,
       newTx,
-      creator.publicKey,
+      creator,
       [creator, mint],
       priorityFees,
       commitment,
@@ -138,10 +160,10 @@ export class PumpFunSDK {
       commitment
     );
 
-    let buyResults = await sendTx(
+    let buyResults = await txExecutor(
       this.connection,
       buyTx,
-      buyer.publicKey,
+      buyer,
       [buyer],
       priorityFees,
       commitment,
@@ -167,10 +189,10 @@ export class PumpFunSDK {
       commitment
     );
 
-    let sellResults = await sendTx(
+    let sellResults = await txExecutor(
       this.connection,
       sellTx,
-      seller.publicKey,
+      seller,
       [seller],
       priorityFees,
       commitment,
