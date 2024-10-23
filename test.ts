@@ -23,15 +23,16 @@ import { getSPLBalance } from "./util";
 
 dotenv.config();
 
-const eventSubscriptionRpcEndpoint = process.env.EVENT_SUBSCRIPTION_ENDPOINT as string;
-const transactionRpcEndpoint = process.env.TRANSACTION_ENDPOINT as string;
-const eventSubscriptionConnection = new Connection(eventSubscriptionRpcEndpoint);
-const transactionConnection = new Connection(transactionRpcEndpoint);
+const eventsWSS = process.env.EVENTS_WSS as string;
+const eventsRPC = process.env.EVENTS_RPC as string;
+const transactionRPC = process.env.TRANSACTION_RPC as string;
+const eventsConnection = new Connection(eventsRPC, { commitment:DEFAULT_COMMITMENT, wsEndpoint: eventsWSS});
+const transactionConnection = new Connection(transactionRPC, { commitment: DEFAULT_COMMITMENT });
 const signerKeyPair = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY || ""));
 const wallet = new NodeWallet(signerKeyPair);
-const eventSubscriptionProvider = new AnchorProvider(eventSubscriptionConnection, wallet, { commitment: "processed" });
-const transactionProvider = new AnchorProvider(transactionConnection, wallet, { commitment: "confirmed" });
-const eventSubscriptionSdk = new PumpFunSDK(eventSubscriptionProvider);
+const eventsProvider = new AnchorProvider(eventsConnection, wallet);
+const transactionProvider = new AnchorProvider(transactionConnection, wallet);
+const eventSdk = new PumpFunSDK(eventsProvider);
 const transactionSdk = new PumpFunSDK(transactionProvider);
 const checkInterval = parseFloat(process.env.CHECK_INTERVAL || "0");
 const buySlippage = BigInt(Math.floor(Number(process.env.BUY_SLIPPAGE || "0")));
@@ -49,12 +50,16 @@ let isProcessingToken = false;
 let eventId: number;
 
 const main = async () => {
-  if (!eventSubscriptionRpcEndpoint) {
-    console.error("Please set EVENT_SUBSCRIPTION_ENDPOINT in .env file");
+  if (!eventsWSS) {
+    console.error("Please set EVENTS_WSS in .env file");
     return;
   }
-  if (!transactionRpcEndpoint) {
-    console.error("Please set TRANSACTION_ENDPOINT in .env file");
+  if (!eventsRPC) {
+    console.error("Please set EVENTS_RPC in .env file");
+    return;
+  }
+  if (!transactionRPC) {
+    console.error("Please set TRANSACTION_RPC in .env file");
     return;
   }
 
@@ -66,24 +71,29 @@ const main = async () => {
     mintCache.add(event.mint.toString());
     isProcessingToken = true;
 
-    console.log(`[${getCurrentDateTime()}] Checking mint: ${event.mint}`);
-    const bondingCurvePercent = await eventSubscriptionSdk.getBondingCurvePercentage(event.mint); 
-    const checkResults = await Promise.all([bondingCurveFilter(bondingCurvePercent!)]);
-    const allFiltersOk = checkResults.every((result: any) => result!.ok);
-
-    if (allFiltersOk) {
-      eventSubscriptionSdk.removeEventListener(eventId);
-      isProcessingToken = true;   
-      buyTransaction(event.mint); 
-    } else {
-      isProcessingToken = false;
-      console.log(checkResults, event.mint.toString());
-    } 
+    if (eventListenerType === "createEvent") {
+      // For "createEvent", bypass filters and proceed to buyTransaction
+      eventSdk.removeEventListener(eventId);
+      buyTransaction(event.mint);
+    } else if (eventListenerType === "tradeEvent") {
+      // For "tradeEvent", apply filtering logic
+      console.log(`[${getCurrentDateTime()}] Checking mint: ${event.mint}`);
+      const bondingCurvePercent = await eventSdk.getBondingCurvePercentage(event.mint);
+      const checkResults = await Promise.all([bondingCurveFilter(bondingCurvePercent!)]);
+      const allFiltersOk = checkResults.every((result: any) => result!.ok);
+  
+      if (allFiltersOk) {
+        eventSdk.removeEventListener(eventId);
+        buyTransaction(event.mint);
+      } else {
+        console.log(checkResults, event.mint.toString(), event.symbol);
+      }
+    }
   };
 
   const validEvents: Array<keyof PumpFunEventHandlers> = ["createEvent", "tradeEvent"];
   if (eventListenerType && validEvents.includes(eventListenerType as keyof PumpFunEventHandlers)) {
-    eventId = eventSubscriptionSdk.addEventListener(eventListenerType as keyof PumpFunEventHandlers, handleEvent);
+    eventId = eventSdk.addEventListener(eventListenerType as keyof PumpFunEventHandlers, handleEvent);
   } else {
     console.error("Invalid or undefined event listener specified in .env file");
   }
@@ -91,7 +101,7 @@ const main = async () => {
 
 // Buy transaction logic
 const buyTransaction = async (mintAddress: PublicKey) => {
-  const bondingCurveAccount = await eventSubscriptionSdk.getBondingCurveAccount(mintAddress);
+  const bondingCurveAccount = await eventSdk.getBondingCurveAccount(mintAddress);
   const expectedAmountOut = bondingCurveAccount?.getBuyPrice(BigInt(buyAmount));
   const slippage = calculateWithSlippageBuy(expectedAmountOut!, buySlippage);
   const buyResult = await transactionSdk.buy(
@@ -122,11 +132,11 @@ const buyTransaction = async (mintAddress: PublicKey) => {
 // Check price at intervals
 const checkPriceIntervals = async (mintAddress: PublicKey, tokenBalance: bigint) => {
   isProcessingToken = true;
-  const tokensBuyPrice = await eventSubscriptionSdk.getTokensBuyPrice(tokenBalance, mintAddress);
+  const tokensBuyPrice = await eventSdk.getTokensBuyPrice(tokenBalance, mintAddress);
   const tokensBuyPriceBN = new BigNumber(tokensBuyPrice!.toString());
   interval = setInterval(async () => {
     try {
-      const tokensSellPrice = await eventSubscriptionSdk.getTokensSellPrice(tokenBalance, mintAddress);
+      const tokensSellPrice = await eventSdk.getTokensSellPrice(tokenBalance, mintAddress);
       const tokensSellPriceBN = new BigNumber(tokensSellPrice!.toString());
       checkTakeProfitOrStopLoss(mintAddress, tokensBuyPriceBN, tokensSellPriceBN, tokenBalance);
     } catch (error) {

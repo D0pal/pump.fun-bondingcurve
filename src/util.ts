@@ -21,13 +21,14 @@ import {
 } from './types';
 import { JitoTransactionExecutor } from './transactions/';
 import dotenv from 'dotenv';
+import bs58 from "bs58";
 
 dotenv.config();
 
 const BLOXROUTE_TIP = parseFloat(process.env.BLOXROUTE_TIP || '0');
 const JITO_TIP = process.env.JITO_TIP || '';
 
-export const DEFAULT_COMMITMENT: Commitment = "confirmed";
+export const DEFAULT_COMMITMENT: Commitment = "processed";
 export const DEFAULT_FINALITY: Finality = "confirmed";
 
 export const calculateWithSlippageBuy = (
@@ -56,15 +57,25 @@ export async function sendTx(
   let newTx = new Transaction();
 
   if (priorityFees) {
-    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: priorityFees.unitLimit,
-    });
+    const priorityFeeData = await applyPriorityFees(
+      connection, 
+      tx, 
+      payer, 
+      priorityFees, 
+      commitment
+    );
 
-    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: priorityFees.unitPrice,
-    });
-    newTx.add(modifyComputeUnits);
-    newTx.add(addPriorityFee);
+    if (!priorityFeeData) {
+      return {
+        success: false,
+        error: "Failed to fetch priority fee estimate",
+      };
+    }
+
+    const { recommendedFee, customersCU } = priorityFeeData;
+
+    newTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: customersCU }));
+    newTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: recommendedFee }));
   }
 
   newTx.add(tx);
@@ -74,9 +85,10 @@ export async function sendTx(
 
   try {
     const sig = await connection.sendTransaction(versionedTx, {
-      skipPreflight: false,
+      skipPreflight: true,
+      maxRetries: 0,
     });
-    console.log("sig:", `https://solscan.io/tx/${sig}`);
+    console.log("Transaction Signature:", `https://solscan.io/tx/${sig}`);
 
     let txResult = await getTxDetails(connection, sig, commitment, finality);
     if (!txResult) {
@@ -85,22 +97,76 @@ export async function sendTx(
         error: "Transaction failed",
       };
     }
+
     return {
       success: true,
       signature: sig,
       results: txResult,
     };
   } catch (e) {
-    if (e instanceof SendTransactionError) {
-      let ste = e as SendTransactionError;
-      console.log(await ste.getLogs(connection));
-    } else {
-      console.error(e);
-    }
+    handleTxError(e, connection);
     return {
       error: e,
       success: false,
     };
+  }
+}
+
+async function applyPriorityFees(
+  connection: Connection,
+  tx: Transaction,
+  payer: Keypair,
+  priorityFees: PriorityFee,
+  commitment: Commitment
+): Promise<{ recommendedFee: number; customersCU: number } | null> {
+  let simulateTx = new Transaction();
+
+  simulateTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: priorityFees.unitLimit }));
+  simulateTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFees.unitPrice }));
+  simulateTx.add(tx);
+
+  const testTransaction = await buildVersionedTx(connection, payer.publicKey, simulateTx, commitment);
+  
+  // Simulate transaction to get units consumed
+  const rpcResponse = await connection.simulateTransaction(testTransaction, {
+    replaceRecentBlockhash: true,
+    sigVerify: false,
+  });
+
+  const unitsConsumed = rpcResponse?.value?.unitsConsumed;
+  if (!unitsConsumed) return null;
+
+  let customersCU = Math.ceil(unitsConsumed * 1.1);
+
+  // Fetch recommended priority fee
+  const response = await fetch(connection.rpcEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "1",
+      method: "getPriorityFeeEstimate",
+      params: [
+        {
+          transaction: bs58.encode(testTransaction.serialize()),
+          options: { recommended: true },
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+  const recommendedFee = data.result?.priorityFeeEstimate;
+  if (!recommendedFee) return null;
+
+  return { recommendedFee, customersCU };
+}
+
+function handleTxError(e: any, connection: Connection): void {
+  if (e instanceof SendTransactionError) {
+    e.getLogs(connection).then(logs => console.log(logs));
+  } else {
+    console.error(e);
   }
 }
 
@@ -116,17 +182,27 @@ export async function sendBloxrouteTx(
   let newTx = new Transaction();
 
   if (priorityFees) {
-    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: priorityFees.unitLimit,
-    });
+    const priorityFeeData = await applyPriorityFees(
+      connection, 
+      tx, 
+      payer, 
+      priorityFees, 
+      commitment
+    );
 
-    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: priorityFees.unitPrice,
-    });
-    newTx.add(modifyComputeUnits);
-    newTx.add(addPriorityFee);
+    if (!priorityFeeData) {
+      return {
+        success: false,
+        error: "Failed to fetch priority fee estimate",
+      };
+    }
+
+    const { recommendedFee, customersCU } = priorityFeeData;
+
+    newTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: customersCU }));
+    newTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: recommendedFee }));
   }
-
+  
   newTx.add(tx);
 
   newTx.add(new TransactionInstruction({
@@ -137,7 +213,7 @@ export async function sendBloxrouteTx(
 
   newTx.add(bloxrouteTip(payer.publicKey, BLOXROUTE_TIP));
 
-  newTx.recentBlockhash = (await connection.getLatestBlockhash("processed")).blockhash;
+  newTx.recentBlockhash = (await connection.getLatestBlockhash(DEFAULT_COMMITMENT)).blockhash;
 
   newTx.feePayer = payer.publicKey;
 
@@ -154,8 +230,7 @@ export async function sendBloxrouteTx(
 
   try {
     const sig = await bloxroutetx(tx64);
-    console.log(sig);
-    console.log("sig:", `https://solscan.io/tx/${sig}`);
+    console.log("Transaction Signature:", `https://solscan.io/tx/${sig}`);
 
     let txResult = await getTxDetails(connection, sig, commitment, finality);
     if (!txResult) {
@@ -170,12 +245,7 @@ export async function sendBloxrouteTx(
       results: txResult,
     };
   } catch (e) {
-    if (e instanceof SendTransactionError) {
-      let ste = e as SendTransactionError;
-      console.log(await ste.getLogs(connection));
-    } else {
-      console.error(e);
-    }
+    handleTxError(e, connection);
     return {
       error: e,
       success: false,
@@ -188,25 +258,36 @@ export async function sendJitoTx(
   tx: Transaction,
   payer: Keypair,
   signers: Keypair[],
-  priorityFees?: PriorityFee
+  priorityFees?: PriorityFee,
+  commitment: Commitment = DEFAULT_COMMITMENT,
 ): Promise<TransactionResult> {
   let newTx = new Transaction();
 
   if (priorityFees) {
-    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: priorityFees.unitLimit,
-    });
+    const priorityFeeData = await applyPriorityFees(
+      connection, 
+      tx, 
+      payer, 
+      priorityFees, 
+      commitment
+    );
 
-    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: priorityFees.unitPrice,
-    });
-    newTx.add(modifyComputeUnits);
-    newTx.add(addPriorityFee);
+    if (!priorityFeeData) {
+      return {
+        success: false,
+        error: "Failed to fetch priority fee estimate",
+      };
+    }
+
+    const { recommendedFee, customersCU } = priorityFeeData;
+
+    newTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: customersCU }));
+    newTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: recommendedFee }));
   }
 
   newTx.add(tx);
 
-  const blockhashInfo = await connection.getLatestBlockhash("processed");
+  const blockhashInfo = await connection.getLatestBlockhash(DEFAULT_COMMITMENT);
   
   newTx.recentBlockhash = blockhashInfo.blockhash;
   
@@ -225,8 +306,7 @@ export async function sendJitoTx(
     const transactionExecutor = new JitoTransactionExecutor(JITO_TIP, connection);
     
     const sig =  await transactionExecutor.executeAndConfirm(versioned, payer, blockhashInfo);
-    console.log(sig.signature);
-    console.log("sig:", `https://solscan.io/tx/${sig.signature}`);
+    console.log("Transaction Signature:", `https://solscan.io/tx/${sig.signature}`);
     
     if (!sig.confirmed) {
       return {
@@ -239,12 +319,7 @@ export async function sendJitoTx(
       signature: sig.signature,
     };
   } catch (e) {
-    if (e instanceof SendTransactionError) {
-      let ste = e as SendTransactionError;
-      console.log(await ste.getLogs(connection));
-    } else {
-      console.error(e);
-    }
+    handleTxError(e, connection);
     return {
       error: e,
       success: false,
