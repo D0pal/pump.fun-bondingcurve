@@ -124,7 +124,7 @@ const buyTransaction = async (mintAddress: PublicKey) => {
   const [splBalance] = await Promise.all([
     getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
   ]);
-  if (buyResult.success && splBalance) {
+  if (splBalance) {
     console.log(`[${getCurrentDateTime()}] Bought token: ${mintAddress}`);
     const tokenBalance = new BigNumber(splBalance ?? 0);
     const tokenBalanceBigInt = BigInt(tokenBalance.multipliedBy(Math.pow(10, DEFAULT_DECIMALS)).toFixed());
@@ -212,7 +212,7 @@ const sellTransaction = async (mintAddress: PublicKey, tokenBalance: bigint) => 
   const [splBalance] = await Promise.all([
     getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
   ]);
-  if (sellResult.success && !splBalance) {
+  if (!splBalance) {
     console.log(`[${getCurrentDateTime()}] Sold token: ${mintAddress}`);
     clearInterval(interval);
     console.log(`[${getCurrentDateTime()}] Gracefully shutting down...`);
