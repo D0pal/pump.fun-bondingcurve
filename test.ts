@@ -25,9 +25,10 @@ dotenv.config();
 
 const eventsWSS = process.env.EVENTS_WSS as string;
 const eventsRPC = process.env.EVENTS_RPC as string;
+const transactionWSS = process.env.TRANSACTION_WSS as string;
 const transactionRPC = process.env.TRANSACTION_RPC as string;
 const eventsConnection = new Connection(eventsRPC, { commitment:DEFAULT_COMMITMENT, wsEndpoint: eventsWSS});
-const transactionConnection = new Connection(transactionRPC, { commitment: DEFAULT_COMMITMENT });
+const transactionConnection = new Connection(transactionRPC, { commitment: DEFAULT_COMMITMENT, wsEndpoint: transactionWSS });
 const signerKeyPair = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY || ""));
 const wallet = new NodeWallet(signerKeyPair);
 const eventsProvider = new AnchorProvider(eventsConnection, wallet);
