@@ -59,6 +59,10 @@ const main = async () => {
     console.error("Please set EVENTS_RPC in .env file");
     return;
   }
+  if (!transactionWSS) {
+    console.error("Please set TRANSACTION_WSS in .env file");
+    return;
+  }
   if (!transactionRPC) {
     console.error("Please set TRANSACTION_RPC in .env file");
     return;
