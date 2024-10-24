@@ -74,6 +74,7 @@ const main = async () => {
 
     if (eventListenerType === "createEvent") {
       // For "createEvent", bypass filters and proceed to buyTransaction
+      console.log(`[${getCurrentDateTime()}] Buying mint: ${event.mint}`);
       eventSdk.removeEventListener(eventId);
       buyTransaction(event.mint);
     } else if (eventListenerType === "tradeEvent") {
@@ -87,7 +88,8 @@ const main = async () => {
         eventSdk.removeEventListener(eventId);
         buyTransaction(event.mint);
       } else {
-        console.log(checkResults, event.mint.toString(), event.symbol);
+        isProcessingToken = false;
+        console.log(checkResults, event.mint.toString());
       }
     }
   };
@@ -119,20 +121,17 @@ const buyTransaction = async (mintAddress: PublicKey) => {
     getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
   ]);
   if (buyResult.success && splBalance) {
-    isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Bought token: ${mintAddress}`);
     const tokenBalance = new BigNumber(splBalance ?? 0);
     const tokenBalanceBigInt = BigInt(tokenBalance.multipliedBy(Math.pow(10, DEFAULT_DECIMALS)).toFixed());
     await checkPriceIntervals(mintAddress, tokenBalanceBigInt);
   } else {
-    isProcessingToken = false;
     console.log("Buy failed.");
   }
 };
 
 // Check price at intervals
 const checkPriceIntervals = async (mintAddress: PublicKey, tokenBalance: bigint) => {
-  isProcessingToken = true;
   const tokensBuyPrice = await eventSdk.getTokensBuyPrice(tokenBalance, mintAddress);
   const tokensBuyPriceBN = new BigNumber(tokensBuyPrice!.toString());
   interval = setInterval(async () => {
@@ -172,13 +171,11 @@ const checkTakeProfitOrStopLoss = async (
   const stopLossTarget = tokensBuyPriceBN.multipliedBy(1 - stopLossPercentage / 100);
   if (takeProfitPercentage && tokensSellPriceBN.isGreaterThanOrEqualTo(profitTarget)) {
     clearInterval(interval);
-    isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Take-profit triggered.`);
     console.log('Executing Take-profit triggered sell transaction...');
     await sellTransaction(mintAddress, tokenBalance);
   } else if (stopLossPercentage && tokensSellPriceBN.isLessThanOrEqualTo(stopLossTarget)) {
     clearInterval(interval);
-    isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Stop-loss triggered.`);
     console.log('Executing Stop-loss triggered sell transaction...');
     await sellTransaction(mintAddress, tokenBalance);
@@ -212,14 +209,12 @@ const sellTransaction = async (mintAddress: PublicKey, tokenBalance: bigint) => 
     getSPLBalance(transactionSdk.connection, mintAddress, signerKeyPair.publicKey)
   ]);
   if (sellResult.success && !splBalance) {
-    isProcessingToken = true;
     console.log(`[${getCurrentDateTime()}] Sold token: ${mintAddress}`);
     clearInterval(interval);
     console.log(`[${getCurrentDateTime()}] Gracefully shutting down...`);
     await new Promise(resolve => setTimeout(resolve, 1000));
     process.exit(0);
   } else {
-    isProcessingToken = false;
     console.log("Sell failed.");
   }
 };
