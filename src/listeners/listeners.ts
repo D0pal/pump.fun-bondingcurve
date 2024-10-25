@@ -72,12 +72,13 @@ export class TokenCreationListener extends EventEmitter {
     });
   
     this.websocket.on('close', () => {
-      console.log('Preemptive WebSocket closed. Reconnecting in 30 seconds...');
+      //console.log('Preemptive WebSocket closed. Reconnecting in 30 seconds...');
+      console.log('Preemptive WebSocket closed.');
       this.stopHeartbeat();
-      setTimeout(() => {
+      /* setTimeout(() => {
         this.preemptiveConnect();
         this.listenForNewTokens(); // Restart listener after reconnecting
-      }, 30000);  // Reconnect after 30 seconds
+      }, 30000);  // Reconnect after 30 seconds */
     });
   }
   
